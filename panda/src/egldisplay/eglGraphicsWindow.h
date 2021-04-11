@@ -16,6 +16,8 @@
 
 #include "pandabase.h"
 
+#ifdef USE_X11
+
 #include "eglGraphicsPipe.h"
 #include "x11GraphicsWindow.h"
 
@@ -33,7 +35,6 @@ public:
                     GraphicsOutput *host);
   virtual ~eglGraphicsWindow();
 
-  virtual bool move_pointer(int device, int x, int y);
   virtual bool begin_frame(FrameMode mode, Thread *current_thread);
   virtual void end_frame(FrameMode mode, Thread *current_thread);
   virtual void end_flip();
@@ -65,5 +66,7 @@ private:
 };
 
 #include "eglGraphicsWindow.I"
+
+#endif  // USE_X11
 
 #endif

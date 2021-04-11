@@ -138,7 +138,7 @@ PUBLISHED:
   INLINE const std::string &get_inactivity_timeout_event() const;
 
   INLINE CPT(PointerEventList) get_trail_log() const;
-  INLINE int   num_trail_recent() const;
+  INLINE size_t num_trail_recent() const;
   void         set_trail_log_duration(double duration);
   PT(GeomNode) get_trail_node();
   void         clear_trail_node();
@@ -157,11 +157,9 @@ protected:
   void set_current_regions(Regions &regions);
   void clear_current_regions();
 
-#ifndef NDEBUG
   virtual void do_show_regions(const NodePath &render2d,
                                const std::string &bin_name, int draw_order);
   virtual void do_hide_regions();
-#endif  // NDEBUG
 
   static void intersect_regions(Regions &only_a,
                                 Regions &only_b,
@@ -220,7 +218,7 @@ private:
   LVecBase4 _frame;
 
   PT(PointerEventList) _trail_log;
-  int _num_trail_recent;
+  size_t _num_trail_recent;
   double _trail_log_duration;
   PT(GeomNode) _trail_node;
 
@@ -260,11 +258,9 @@ private:
   };
   InactivityState _inactivity_state;
 
-#ifndef NDEBUG
   NodePath _show_regions_render2d;
   std::string _show_regions_bin_name;
   int _show_regions_draw_order;
-#endif
 
 protected:
   // Inherited from DataNode

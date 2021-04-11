@@ -16,6 +16,7 @@
 
 #include "dtoolbase.h"
 #include "mutexImpl.h"
+#include "atomicAdjust.h"
 
 /**
  * The base class for both IStreamWrapper and OStreamWrapper, this provides
@@ -25,13 +26,23 @@ class EXPCL_DTOOL_PRC StreamWrapperBase {
 protected:
   INLINE StreamWrapperBase();
   INLINE StreamWrapperBase(const StreamWrapperBase &copy) = delete;
+  virtual ~StreamWrapperBase() {}
 
 PUBLISHED:
   INLINE void acquire();
   INLINE void release();
 
+public:
+  INLINE void ref() const;
+  INLINE bool unref() const;
+
 private:
   MutexImpl _lock;
+
+  // This isn't really designed as a reference counted class, but it is useful
+  // to treat it as one when dealing with substreams created by Multifile.
+  mutable AtomicAdjust::Integer _ref_count = 1;
+
 #ifdef SIMPLE_THREADS
   // In the SIMPLE_THREADS case, we need to use a bool flag, because MutexImpl
   // defines to nothing in this case--but we still need to achieve a form of
@@ -54,7 +65,7 @@ PUBLISHED:
   ~IStreamWrapper();
 
   INLINE std::istream *get_istream() const;
-  MAKE_PROPERTY(std::istream, get_istream);
+  MAKE_PROPERTY(istream, get_istream);
 
 public:
   void read(char *buffer, std::streamsize num_bytes);
@@ -81,7 +92,7 @@ PUBLISHED:
   ~OStreamWrapper();
 
   INLINE std::ostream *get_ostream() const;
-  MAKE_PROPERTY(std::ostream, get_ostream);
+  MAKE_PROPERTY(ostream, get_ostream);
 
 public:
   void write(const char *buffer, std::streamsize num_bytes);
@@ -100,7 +111,7 @@ private:
   // until some data has been written to the stream.  When this flag is set
   // true, we know we have a possibly-empty stringstream, so we allow seekp(0)
   // to fail silently, knowing that there's no harm in this case.
-#ifdef WIN32_VC
+#ifdef _MSC_VER
   bool _stringstream_hack;
 #endif
 };
@@ -117,7 +128,7 @@ PUBLISHED:
   ~StreamWrapper();
 
   INLINE std::iostream *get_iostream() const;
-  MAKE_PROPERTY(std::iostream, get_iostream);
+  MAKE_PROPERTY(iostream, get_iostream);
 
 private:
   std::iostream *_iostream;

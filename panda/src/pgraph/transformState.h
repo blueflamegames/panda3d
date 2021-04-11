@@ -76,6 +76,8 @@ PUBLISHED:
   INLINE static CPT(TransformState) make_quat(const LQuaternion &quat);
   INLINE static CPT(TransformState) make_pos_hpr(const LVecBase3 &pos,
                                                  const LVecBase3 &hpr);
+  INLINE static CPT(TransformState) make_pos_quat(const LVecBase3 &pos,
+                                                  const LQuaternion &quat);
   INLINE static CPT(TransformState) make_scale(PN_stdfloat scale);
   INLINE static CPT(TransformState) make_scale(const LVecBase3 &scale);
   INLINE static CPT(TransformState) make_shear(const LVecBase3 &shear);
@@ -213,6 +215,11 @@ public:
 
   INLINE static void flush_level();
 
+  INLINE void cache_ref_only() const;
+
+protected:
+  INLINE void cache_unref_only() const;
+
 private:
   INLINE bool do_cache_unref() const;
   INLINE bool do_node_unref() const;
@@ -253,7 +260,7 @@ private:
   // _invert_composition_cache.
   static LightReMutex *_states_lock;
   typedef SimpleHashMap<const TransformState *, std::nullptr_t, indirect_equals_hash<const TransformState *> > States;
-  static States *_states;
+  static States _states;
   static CPT(TransformState) _identity_state;
   static CPT(TransformState) _invalid_state;
 

@@ -3,11 +3,10 @@ import pytest
 import time
 import sys
 
-if sys.version_info >= (3,):
-    from concurrent.futures._base import TimeoutError, CancelledError
+if sys.version_info >= (3, 8):
+    from asyncio.exceptions import TimeoutError, CancelledError
 else:
-    TimeoutError = Exception
-    CancelledError = Exception
+    from concurrent.futures._base import TimeoutError, CancelledError
 
 
 def test_future_cancelled():
@@ -164,6 +163,71 @@ def test_coro_exception():
         task.result()
 
 
+def test_future_result():
+    # Cancelled
+    fut = core.AsyncFuture()
+    assert not fut.done()
+    fut.cancel()
+    with pytest.raises(CancelledError):
+        fut.result()
+
+    # None
+    fut = core.AsyncFuture()
+    fut.set_result(None)
+    assert fut.done()
+    assert fut.result() is None
+
+    # Store int
+    fut = core.AsyncFuture()
+    fut.set_result(123)
+    assert fut.result() == 123
+
+    # Store string
+    fut = core.AsyncFuture()
+    fut.set_result("test\000\u1234")
+    assert fut.result() == "test\000\u1234"
+
+    # Store TypedWritableReferenceCount
+    tex = core.Texture()
+    rc = tex.get_ref_count()
+    fut = core.AsyncFuture()
+    fut.set_result(tex)
+    assert tex.get_ref_count() == rc + 1
+    assert fut.result() == tex
+    assert tex.get_ref_count() == rc + 1
+    assert fut.result() == tex
+    assert tex.get_ref_count() == rc + 1
+    fut = None
+    assert tex.get_ref_count() == rc
+
+    # Store EventParameter (no longer gets unwrapped)
+    ep = core.EventParameter(0.5)
+    fut = core.AsyncFuture()
+    fut.set_result(ep)
+    assert fut.result() is ep
+    assert fut.result() is ep
+
+    # Store TypedObject
+    dg = core.Datagram(b"test")
+    fut = core.AsyncFuture()
+    fut.set_result(dg)
+    assert fut.result() == dg
+    assert fut.result() == dg
+
+    # Store arbitrary Python object
+    obj = object()
+    rc = sys.getrefcount(obj)
+    fut = core.AsyncFuture()
+    fut.set_result(obj)
+    assert sys.getrefcount(obj) == rc + 1
+    assert fut.result() is obj
+    assert sys.getrefcount(obj) == rc + 1
+    assert fut.result() is obj
+    assert sys.getrefcount(obj) == rc + 1
+    fut = None
+    assert sys.getrefcount(obj) == rc
+
+
 def test_future_gather():
     fut1 = core.AsyncFuture()
     fut2 = core.AsyncFuture()
@@ -223,6 +287,66 @@ def test_future_gather_cancel_outer():
 
     with pytest.raises(CancelledError):
         assert gather.result()
+
+
+def test_future_shield():
+    # An already done future is returned as-is (no cancellation can occur)
+    inner = core.AsyncFuture()
+    inner.set_result(None)
+    outer = core.AsyncFuture.shield(inner)
+    assert inner == outer
+
+    # Normally finishing future
+    inner = core.AsyncFuture()
+    outer = core.AsyncFuture.shield(inner)
+    assert not outer.done()
+    inner.set_result(None)
+    assert outer.done()
+    assert not outer.cancelled()
+    assert inner.result() is None
+
+    # Normally finishing future with result
+    inner = core.AsyncFuture()
+    outer = core.AsyncFuture.shield(inner)
+    assert not outer.done()
+    inner.set_result(123)
+    assert outer.done()
+    assert not outer.cancelled()
+    assert inner.result() == 123
+
+    # Cancelled inner future does propagate cancellation outward
+    inner = core.AsyncFuture()
+    outer = core.AsyncFuture.shield(inner)
+    assert not outer.done()
+    inner.cancel()
+    assert outer.done()
+    assert outer.cancelled()
+
+    # Finished outer future does nothing to inner
+    inner = core.AsyncFuture()
+    outer = core.AsyncFuture.shield(inner)
+    outer.set_result(None)
+    assert not inner.done()
+    inner.cancel()
+    assert not outer.cancelled()
+
+    # Cancelled outer future does nothing to inner
+    inner = core.AsyncFuture()
+    outer = core.AsyncFuture.shield(inner)
+    outer.cancel()
+    assert not inner.done()
+    inner.cancel()
+
+    # Can be shielded multiple times
+    inner = core.AsyncFuture()
+    outer1 = core.AsyncFuture.shield(inner)
+    outer2 = core.AsyncFuture.shield(inner)
+    outer1.cancel()
+    assert not inner.done()
+    assert not outer2.done()
+    inner.cancel()
+    assert outer1.done()
+    assert outer2.done()
 
 
 def test_future_done_callback():

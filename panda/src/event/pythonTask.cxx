@@ -20,6 +20,7 @@
 
 #include "pythonThread.h"
 #include "asyncTaskManager.h"
+#include "asyncFuture_ext.h"
 
 TypeHandle PythonTask::_type_handle;
 
@@ -52,12 +53,10 @@ PythonTask(PyObject *func_or_coro, const std::string &name) :
   if (func_or_coro == Py_None || PyCallable_Check(func_or_coro)) {
     _function = func_or_coro;
     Py_INCREF(_function);
-#if PY_VERSION_HEX >= 0x03050000
   } else if (PyCoro_CheckExact(func_or_coro)) {
     // We also allow passing in a coroutine, because why not.
     _generator = func_or_coro;
     Py_INCREF(_generator);
-#endif
   } else if (PyGen_CheckExact(func_or_coro)) {
     // Something emulating a coroutine.
     _generator = func_or_coro;
@@ -72,11 +71,11 @@ PythonTask(PyObject *func_or_coro, const std::string &name) :
 
   __dict__ = PyDict_New();
 
-#ifndef SIMPLE_THREADS
+#if !defined(SIMPLE_THREADS) && defined(WITH_THREAD) && PY_VERSION_HEX < 0x03090000
   // Ensure that the Python threading system is initialized and ready to go.
-#ifdef WITH_THREAD  // This symbol defined within Python.h
+  // WITH_THREAD symbol defined within Python.h
+  // PyEval_InitThreads is now a deprecated no-op in Python 3.9+
   PyEval_InitThreads();
-#endif
 #endif
 }
 
@@ -85,7 +84,6 @@ PythonTask(PyObject *func_or_coro, const std::string &name) :
  */
 PythonTask::
 ~PythonTask() {
-#ifndef NDEBUG
   // If the coroutine threw an exception, and there was no opportunity to
   // handle it, let the user know.
   if (_exception != nullptr && !_retrieved_exception) {
@@ -98,7 +96,6 @@ PythonTask::
     _exc_value = nullptr;
     _exc_traceback = nullptr;
   }
-#endif
 
   Py_XDECREF(_function);
   Py_DECREF(_args);
@@ -267,11 +264,11 @@ exception() const {
     Py_INCREF(Py_None);
     return Py_None;
   } else if (_exc_value == nullptr || _exc_value == Py_None) {
-    return _PyObject_CallNoArg(_exception);
+    return PyObject_CallNoArgs(_exception);
   } else if (PyTuple_Check(_exc_value)) {
     return PyObject_Call(_exception, _exc_value, nullptr);
   } else {
-    return PyObject_CallFunctionObjArgs(_exception, _exc_value, nullptr);
+    return PyObject_CallOneArg(_exception, _exc_value);
   }
 }*/
 
@@ -283,27 +280,28 @@ exception() const {
  */
 int PythonTask::
 __setattr__(PyObject *self, PyObject *attr, PyObject *v) {
-  if (PyObject_GenericSetAttr(self, attr, v) == 0) {
-    return 0;
-  }
-
-  if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+  if (!PyUnicode_Check(attr)) {
+    PyErr_Format(PyExc_TypeError,
+                 "attribute name must be string, not '%.200s'",
+                 attr->ob_type->tp_name);
     return -1;
   }
 
-  PyErr_Clear();
+  PyObject *descr = _PyType_Lookup(Py_TYPE(self), attr);
+  if (descr != nullptr) {
+    Py_INCREF(descr);
+    descrsetfunc f = descr->ob_type->tp_descr_set;
+    if (f != nullptr) {
+      return f(descr, self, v);
+    }
+  }
 
   if (task_cat.is_debug()) {
     PyObject *str = PyObject_Repr(v);
     task_cat.debug()
       << *this << ": task."
-#if PY_MAJOR_VERSION >= 3
       << PyUnicode_AsUTF8(attr) << " = "
       << PyUnicode_AsUTF8(str) << "\n";
-#else
-      << PyString_AsString(attr) << " = "
-      << PyString_AsString(str) << "\n";
-#endif
     Py_DECREF(str);
   }
 
@@ -330,15 +328,9 @@ __delattr__(PyObject *self, PyObject *attr) {
 
   if (PyDict_DelItem(__dict__, attr) == -1) {
     // PyDict_DelItem does not raise an exception.
-#if PY_MAJOR_VERSION < 3
-    PyErr_Format(PyExc_AttributeError,
-                 "'PythonTask' object has no attribute '%.400s'",
-                 PyString_AS_STRING(attr));
-#else
     PyErr_Format(PyExc_AttributeError,
                  "'PythonTask' object has no attribute '%U'",
                  attr);
-#endif
     return -1;
   }
 
@@ -352,31 +344,18 @@ __delattr__(PyObject *self, PyObject *attr) {
  * object.
  */
 PyObject *PythonTask::
-__getattr__(PyObject *attr) const {
-  // Note that with the new Interrogate behavior, this method behaves more
-  // like the Python __getattr__ rather than being directly assigned to the
-  // tp_getattro slot (a la __getattribute__). So, we won't get here when the
-  // attribute has already been found via other methods.
-
+__getattribute__(PyObject *self, PyObject *attr) const {
+  // We consult the instance dict first, since the user may have overridden a
+  // method or something.
   PyObject *item = PyDict_GetItem(__dict__, attr);
 
-  if (item == nullptr) {
-    // PyDict_GetItem does not raise an exception.
-#if PY_MAJOR_VERSION < 3
-    PyErr_Format(PyExc_AttributeError,
-                 "'PythonTask' object has no attribute '%.400s'",
-                 PyString_AS_STRING(attr));
-#else
-    PyErr_Format(PyExc_AttributeError,
-                 "'PythonTask' object has no attribute '%U'",
-                 attr);
-#endif
-    return nullptr;
+  if (item != nullptr) {
+    // PyDict_GetItem returns a borrowed reference.
+    Py_INCREF(item);
+    return item;
   }
 
-  // PyDict_GetItem returns a borrowed reference.
-  Py_INCREF(item);
-  return item;
+  return PyObject_GenericGetAttr(self, attr);
 }
 
 /**
@@ -409,6 +388,51 @@ __clear__() {
   Py_CLEAR(_generator);
 */
   return 0;
+}
+
+/**
+ * Cancels this task.  This is equivalent to remove(), except for coroutines,
+ * for which it will throw an exception into any currently pending await.
+ */
+bool PythonTask::
+cancel() {
+  AsyncTaskManager *manager = _manager;
+  if (manager != nullptr) {
+    nassertr(_chain->_manager == manager, false);
+    if (task_cat.is_debug()) {
+      task_cat.debug()
+        << "Cancelling " << *this << "\n";
+    }
+
+    MutexHolder holder(manager->_lock);
+    if (_state == S_awaiting) {
+      // Reactivate it so that it can receive a CancelledException.
+      _must_cancel = true;
+      _state = AsyncTask::S_active;
+      _chain->_active.push_back(this);
+      --_chain->_num_awaiting_tasks;
+      return true;
+    }
+    else if (_future_done != nullptr) {
+      // We are polling, waiting for a non-Panda future to be done.
+      Py_DECREF(_future_done);
+      _future_done = nullptr;
+      _must_cancel = true;
+      return true;
+    }
+    else if (_chain->do_remove(this, true)) {
+      return true;
+    }
+    else {
+      if (task_cat.is_debug()) {
+        task_cat.debug()
+          << "  (unable to cancel " << *this << ")\n";
+      }
+      return false;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -455,7 +479,7 @@ do_python_task() {
 
   // Are we waiting for a future to finish?
   if (_future_done != nullptr) {
-    PyObject *is_done = PyObject_CallObject(_future_done, nullptr);
+    PyObject *is_done = PyObject_CallNoArgs(_future_done);
     if (!PyObject_IsTrue(is_done)) {
       // Nope, ask again next frame.
       Py_DECREF(is_done);
@@ -478,23 +502,15 @@ do_python_task() {
       // The function has yielded a generator.  We will call into that
       // henceforth, instead of calling the function from the top again.
       if (task_cat.is_debug()) {
-#if PY_MAJOR_VERSION >= 3
         PyObject *str = PyObject_ASCII(_function);
         task_cat.debug()
           << PyUnicode_AsUTF8(str) << " in " << *this
           << " yielded a generator.\n";
-#else
-        PyObject *str = PyObject_Repr(_function);
-        task_cat.debug()
-          << PyString_AsString(str) << " in " << *this
-          << " yielded a generator.\n";
-#endif
         Py_DECREF(str);
       }
       _generator = result;
       result = nullptr;
 
-#if PY_VERSION_HEX >= 0x03050000
     } else if (result != nullptr && Py_TYPE(result)->tp_as_async != nullptr) {
       // The function yielded a coroutine, or something of the sort.
       if (task_cat.is_debug()) {
@@ -516,17 +532,26 @@ do_python_task() {
         Py_DECREF(result);
       }
       result = nullptr;
-#endif
     }
   }
 
   if (_generator != nullptr) {
-    // We are calling a generator.  Use "send" rather than PyIter_Next since
-    // we need to be able to read the value from a StopIteration exception.
-    PyObject *func = PyObject_GetAttrString(_generator, "send");
-    nassertr(func != nullptr, DS_interrupt);
-    result = PyObject_CallFunctionObjArgs(func, Py_None, nullptr);
-    Py_DECREF(func);
+    if (!_must_cancel) {
+      // We are calling a generator.  Use "send" rather than PyIter_Next since
+      // we need to be able to read the value from a StopIteration exception.
+      PyObject *func = PyObject_GetAttrString(_generator, "send");
+      nassertr(func != nullptr, DS_interrupt);
+      result = PyObject_CallOneArg(func, Py_None);
+      Py_DECREF(func);
+    } else {
+      // Throw a CancelledError into the generator.
+      _must_cancel = false;
+      PyObject *exc = PyObject_CallNoArgs(Extension<AsyncFuture>::get_cancelled_error_type());
+      PyObject *func = PyObject_GetAttrString(_generator, "throw");
+      result = PyObject_CallFunctionObjArgs(func, exc, nullptr);
+      Py_DECREF(func);
+      Py_DECREF(exc);
+    }
 
     if (result == nullptr) {
       // An error happened.  If StopIteration, that indicates the task has
@@ -535,14 +560,14 @@ do_python_task() {
       Py_DECREF(_generator);
       _generator = nullptr;
 
-#if PY_VERSION_HEX >= 0x03030000
       if (_PyGen_FetchStopIterationValue(&result) == 0) {
-#else
-      if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
-        result = Py_None;
-        Py_INCREF(result);
-#endif
-        PyErr_Restore(nullptr, nullptr, nullptr);
+        PyErr_Clear();
+
+        if (_must_cancel) {
+          // Task was cancelled right before finishing.  Make sure it is not
+          // getting rerun or marked as successfully completed.
+          _state = S_servicing_removed;
+        }
 
         // If we passed a coroutine into the task, eg. something like:
         //   taskMgr.add(my_async_function())
@@ -559,6 +584,18 @@ do_python_task() {
           _exc_value = result;
           return DS_done;
         }
+
+      } else if (PyErr_ExceptionMatches(Extension<AsyncFuture>::get_cancelled_error_type())) {
+        // Someone cancelled the coroutine, and it did not bother to handle it,
+        // so we should consider it cancelled.
+        if (task_cat.is_debug()) {
+          task_cat.debug()
+            << *this << " was cancelled and did not catch CancelledError.\n";
+        }
+        _state = S_servicing_removed;
+        PyErr_Clear();
+        return DS_done;
+
       } else if (_function == nullptr) {
         // We got an exception.  If this is a scheduled coroutine, we will
         // keep it and instead throw it into whatever 'awaits' this task.
@@ -585,6 +622,11 @@ do_python_task() {
         return DS_done;
       }
 
+    } else if (result == Py_None) {
+      // Bare yield means to continue next frame.
+      Py_DECREF(result);
+      return DS_cont;
+
     } else if (DtoolInstance_Check(result)) {
       // We are waiting for an AsyncFuture (eg. other task) to finish.
       AsyncFuture *fut = (AsyncFuture *)DtoolInstance_UPCAST(result, Dtool_AsyncFuture);
@@ -598,7 +640,9 @@ do_python_task() {
             // directly instead of having to do:
             //   await taskMgr.add(Task.pause(1.0))
             AsyncTask *task = (AsyncTask *)fut;
-            _manager->add(task);
+            if (!task->is_alive()) {
+              _manager->add(task);
+            }
           }
           if (fut->add_waiting_task(this)) {
             if (task_cat.is_debug()) {
@@ -636,14 +680,12 @@ do_python_task() {
             << "future.done is not callable\n";
           return DS_interrupt;
         }
-#if PY_MAJOR_VERSION >= 3
         if (task_cat.is_debug()) {
           PyObject *str = PyObject_ASCII(result);
           task_cat.debug()
             << *this << " is now polling " << PyUnicode_AsUTF8(str) << ".done()\n";
           Py_DECREF(str);
         }
-#endif
         Py_DECREF(result);
         return DS_cont;
       }
@@ -672,13 +714,8 @@ do_python_task() {
     return DS_done;
   }
 
-#if PY_MAJOR_VERSION >= 3
   if (PyLong_Check(result)) {
     long retval = PyLong_AS_LONG(result);
-#else
-  if (PyInt_Check(result)) {
-    long retval = PyInt_AS_LONG(result);
-#endif
 
     switch (retval) {
     case DS_again:
@@ -711,11 +748,7 @@ do_python_task() {
   PyMethodDef *meth = nullptr;
   if (PyCFunction_Check(result)) {
     meth = ((PyCFunctionObject *)result)->m_ml;
-#if PY_MAJOR_VERSION >= 3
   } else if (Py_TYPE(result) == &PyMethodDescr_Type) {
-#else
-  } else if (strcmp(Py_TYPE(result)->tp_name, "method_descriptor") == 0) {
-#endif
     meth = ((PyMethodDescrObject *)result)->d_method;
   }
 
@@ -725,21 +758,12 @@ do_python_task() {
   }
 
   std::ostringstream strm;
-#if PY_MAJOR_VERSION >= 3
   PyObject *str = PyObject_ASCII(result);
   if (str == nullptr) {
     str = PyUnicode_FromString("<repr error>");
   }
   strm
     << *this << " returned " << PyUnicode_AsUTF8(str);
-#else
-  PyObject *str = PyObject_Repr(result);
-  if (str == nullptr) {
-    str = PyString_FromString("<repr error>");
-  }
-  strm
-    << *this << " returned " << PyString_AsString(str);
-#endif
   Py_DECREF(str);
   Py_DECREF(result);
   std::string message = strm.str();
@@ -776,6 +800,12 @@ upon_birth(AsyncTaskManager *manager) {
 void PythonTask::
 upon_death(AsyncTaskManager *manager, bool clean_exit) {
   AsyncTask::upon_death(manager, clean_exit);
+
+  // If we were polling something when we were removed, get rid of it.
+  if (_future_done != nullptr) {
+    Py_DECREF(_future_done);
+    _future_done = nullptr;
+  }
 
   if (_upon_death != Py_None) {
 #if defined(HAVE_THREADS) && !defined(SIMPLE_THREADS)
@@ -865,7 +895,7 @@ call_function(PyObject *function) {
   if (function != Py_None) {
     this->ref();
     PyObject *self = DTool_CreatePyInstance(this, Dtool_PythonTask, true, false);
-    PyObject *result = PyObject_CallFunctionObjArgs(function, self, nullptr);
+    PyObject *result = PyObject_CallOneArg(function, self);
     Py_XDECREF(result);
     Py_DECREF(self);
   }

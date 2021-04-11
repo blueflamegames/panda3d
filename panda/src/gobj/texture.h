@@ -29,7 +29,7 @@
 #include "pStatCollector.h"
 #include "pmutex.h"
 #include "mutexHolder.h"
-#include "conditionVarFull.h"
+#include "conditionVar.h"
 #include "loaderOptions.h"
 #include "string_utils.h"
 #include "cycleData.h"
@@ -161,7 +161,15 @@ PUBLISHED:
     F_rgb10_a2,
 
     F_rg,
-    F_r16i
+
+    F_r16i,
+    F_rg16i,
+    F_rgb16i, // not recommended
+    F_rgba16i,
+
+    F_rg32i,
+    F_rgb32i,
+    F_rgba32i,
   };
 
   // Deprecated.  See SamplerState.FilterType.
@@ -625,6 +633,7 @@ public:
   static bool has_alpha(Format format);
   static bool has_binary_alpha(Format format);
   static bool is_srgb(Format format);
+  static bool is_integer(Format format);
 
   static bool adjust_size(int &x_size, int &y_size, const std::string &name,
                           bool for_padding, AutoTextureScale auto_texture_scale = ATS_unspecified);
@@ -1034,7 +1043,7 @@ protected:
   Mutex _lock;
 
   // Used to implement unlocked_reload_ram_image().
-  ConditionVarFull _cvar;  // condition: _reloading is true.
+  ConditionVar _cvar;  // condition: _reloading is true.
   bool _reloading;
 
   // A Texture keeps a list (actually, a map) of all the

@@ -71,6 +71,15 @@ unmark(VrpnDialDevice *device) {
 }
 
 /**
+ * Polls the connected device.  Normally you should not call this directly;
+ * this will be called by the VrpnClient.
+ */
+void VrpnDial::
+poll() {
+  _dial->mainloop();
+}
+
+/**
  *
  */
 void VrpnDial::
@@ -104,8 +113,6 @@ vrpn_dial_callback(void *userdata, const vrpn_DIALCB info) {
   Devices::iterator di;
   for (di = self->_devices.begin(); di != self->_devices.end(); ++di) {
     VrpnDialDevice *device = (*di);
-    device->acquire();
     device->push_dial(info.dial, info.change);
-    device->unlock();
   }
 }

@@ -71,6 +71,15 @@ unmark(VrpnAnalogDevice *device) {
 }
 
 /**
+ * Polls the connected device.  Normally you should not call this directly;
+ * this will be called by the VrpnClient.
+ */
+void VrpnAnalog::
+poll() {
+  _analog->mainloop();
+}
+
+/**
  *
  */
 void VrpnAnalog::
@@ -99,16 +108,8 @@ vrpn_analog_callback(void *userdata, const vrpn_ANALOGCB info) {
   Devices::iterator di;
   for (di = self->_devices.begin(); di != self->_devices.end(); ++di) {
     VrpnAnalogDevice *device = (*di);
-    device->acquire();
     for (int i = 0; i < info.num_channel; i++) {
-      if (vrpn_cat.is_debug()) {
-        if (device->get_control_state(i) != info.channel[i]) {
-          vrpn_cat.debug()
-            << *self << " got analog " << i << " = " << info.channel[i] << "\n";
-        }
-      }
-      device->set_control_state(i, info.channel[i]);
+      device->set_axis_value(i, info.channel[i]);
     }
-    device->unlock();
   }
 }

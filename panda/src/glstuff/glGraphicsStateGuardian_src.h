@@ -92,6 +92,7 @@ typedef void (APIENTRYP PFNGLGENBUFFERSPROC) (GLsizei n, GLuint *buffers);
 typedef void (APIENTRYP PFNGLBINDBUFFERPROC) (GLenum target, GLuint buffer);
 typedef void (APIENTRYP PFNGLBUFFERSUBDATAPROC) (GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
 typedef void (APIENTRYP PFNGLDRAWBUFFERSPROC) (GLsizei n, const GLenum *bufs);
+typedef void (APIENTRYP PFNGLREADBUFFERPROC) (GLenum src);
 typedef void (APIENTRYP PFNGLCLEARBUFFERFVPROC) (GLenum buffer, GLint drawbuffer, const GLfloat *value);
 typedef void (APIENTRYP PFNGLBUFFERDATAPROC) (GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage);
 typedef void (APIENTRYP PFNGLDELETEBUFFERSPROC) (GLsizei n, const GLuint *buffers);
@@ -146,6 +147,7 @@ typedef void (APIENTRYP PFNGLBLENDFUNCSEPARATEPROC) (GLenum sfactorRGB, GLenum d
 // GLSL shader functions
 typedef void (APIENTRYP PFNGLATTACHSHADERPROC) (GLuint program, GLuint shader);
 typedef void (APIENTRYP PFNGLBINDATTRIBLOCATIONPROC) (GLuint program, GLuint index, const GLchar *name);
+typedef void (APIENTRYP PFNGLBINDFRAGDATALOCATIONPROC) (GLuint program, GLuint color, const GLchar *name);
 typedef void (APIENTRYP PFNGLCOMPILESHADERPROC) (GLuint shader);
 typedef GLuint (APIENTRYP PFNGLCREATEPROGRAMPROC) (void);
 typedef GLuint (APIENTRYP PFNGLCREATESHADERPROC) (GLenum type);
@@ -184,6 +186,7 @@ typedef void (APIENTRYP PFNGLUNIFORMMATRIX4FVPROC) (GLint location, GLsizei coun
 typedef void (APIENTRYP PFNGLVALIDATEPROGRAMPROC) (GLuint program);
 typedef void (APIENTRYP PFNGLVERTEXATTRIB4FVPROC) (GLuint index, const GLfloat *v);
 typedef void (APIENTRYP PFNGLVERTEXATTRIB4DVPROC) (GLuint index, const GLdouble *v);
+typedef void (APIENTRYP PFNGLVERTEXATTRIBI4UIPROC) (GLuint index, GLuint x, GLuint y, GLuint z, GLuint w);
 typedef void (APIENTRYP PFNGLVERTEXATTRIBPOINTERPROC) (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const GLvoid *pointer);
 typedef void (APIENTRYP PFNGLVERTEXATTRIBIPOINTERPROC) (GLuint index, GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 typedef void (APIENTRYP PFNGLVERTEXATTRIBLPOINTERPROC) (GLuint index, GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
@@ -275,6 +278,9 @@ public:
 
   static void APIENTRY debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message, GLvoid *userParam);
 
+  INLINE virtual void push_group_marker(const std::string &marker) final;
+  INLINE virtual void pop_group_marker() final;
+
   virtual void reset();
 
   virtual void prepare_display_region(DisplayRegionPipelineReader *dr);
@@ -289,7 +295,7 @@ public:
 
   virtual bool begin_draw_primitives(const GeomPipelineReader *geom_reader,
                                      const GeomVertexDataPipelineReader *data_reader,
-                                     bool force);
+                                     size_t num_instances, bool force);
   virtual bool draw_triangles(const GeomPrimitivePipelineReader *reader,
                               bool force);
 #ifndef OPENGLES
@@ -329,6 +335,7 @@ public:
   virtual TextureContext *prepare_texture(Texture *tex, int view);
   virtual bool update_texture(TextureContext *tc, bool force);
   virtual void release_texture(TextureContext *tc);
+  virtual void release_textures(const pvector<TextureContext *> &contexts);
   virtual bool extract_texture_data(Texture *tex);
 
 #ifndef OPENGLES_1
@@ -349,6 +356,7 @@ public:
                             const GeomVertexArrayDataHandle *reader,
                             bool force);
   virtual void release_vertex_buffer(VertexBufferContext *vbc);
+  virtual void release_vertex_buffers(const pvector<BufferContext *> &contexts);
 
   bool setup_array_data(const unsigned char *&client_pointer,
                         const GeomVertexArrayDataHandle *data,
@@ -359,6 +367,7 @@ public:
                           const GeomPrimitivePipelineReader *reader,
                           bool force);
   virtual void release_index_buffer(IndexBufferContext *ibc);
+  virtual void release_index_buffers(const pvector<BufferContext *> &contexts);
   bool setup_primitive(const unsigned char *&client_pointer,
                        const GeomPrimitivePipelineReader *reader,
                        bool force);
@@ -367,6 +376,7 @@ public:
   virtual BufferContext *prepare_shader_buffer(ShaderBuffer *data);
   void apply_shader_buffer(GLuint base, ShaderBuffer *buffer);
   virtual void release_shader_buffer(BufferContext *bc);
+  virtual void release_shader_buffers(const pvector<BufferContext *> &contexts);
 #endif
 
 #ifndef OPENGLES
@@ -499,6 +509,10 @@ protected:
 #endif
 
   virtual void free_pointers();
+
+#if defined(HAVE_CG) && !defined(OPENGLES)
+  CGcontext get_cg_context();
+#endif
 
 #ifndef OPENGLES_1
   INLINE void enable_vertex_attrib_array(GLuint index);
@@ -681,8 +695,12 @@ protected:
 #endif
 #endif
 
-#ifdef HAVE_CG
+  GLfloat _max_line_width;
+
+#if defined(HAVE_CG) && !defined(OPENGLES)
   CGcontext _cg_context;
+  static AtomicAdjust::Integer _num_gsgs_with_cg_contexts;
+  static pvector<CGcontext> _destroyed_cg_contexts;
 #endif
 
 #ifdef SUPPORT_IMMEDIATE_MODE
@@ -777,7 +795,9 @@ public:
 #endif
 
   bool _supports_tex_storage;
+#ifndef OPENGLES
   PFNGLTEXSTORAGE1DPROC _glTexStorage1D;
+#endif
   PFNGLTEXSTORAGE2DPROC _glTexStorage2D;
   PFNGLTEXSTORAGE3DPROC _glTexStorage3D;
 
@@ -804,6 +824,7 @@ public:
   PFNGLGETCOMPRESSEDTEXIMAGEPROC _glGetCompressedTexImage;
 
   bool _supports_bgr;
+  bool _supports_bgra_read;
   bool _supports_packed_dabc;
   bool _supports_packed_ufloat;
 
@@ -929,6 +950,10 @@ public:
   PFNGLBLITFRAMEBUFFEREXTPROC _glBlitFramebuffer;
   PFNGLDRAWBUFFERSPROC _glDrawBuffers;
 
+#if defined(OPENGLES) && !defined(OPENGLES_1)
+  PFNGLREADBUFFERPROC _glReadBuffer;
+#endif
+
 #ifndef OPENGLES_1
   PFNGLCLEARBUFFERFVPROC _glClearBufferfv;
   PFNGLCLEARBUFFERIVPROC _glClearBufferiv;
@@ -960,6 +985,7 @@ public:
   // GLSL functions
   PFNGLATTACHSHADERPROC _glAttachShader;
   PFNGLBINDATTRIBLOCATIONPROC _glBindAttribLocation;
+  PFNGLBINDFRAGDATALOCATIONPROC _glBindFragDataLocation;
   PFNGLCOMPILESHADERPROC _glCompileShader;
   PFNGLCREATEPROGRAMPROC _glCreateProgram;
   PFNGLCREATESHADERPROC _glCreateShader;
@@ -998,6 +1024,7 @@ public:
   PFNGLVALIDATEPROGRAMPROC _glValidateProgram;
   PFNGLVERTEXATTRIB4FVPROC _glVertexAttrib4fv;
   PFNGLVERTEXATTRIB4DVPROC _glVertexAttrib4dv;
+  PFNGLVERTEXATTRIBI4UIPROC _glVertexAttribI4ui;
   PFNGLVERTEXATTRIBPOINTERPROC _glVertexAttribPointer;
   PFNGLVERTEXATTRIBIPOINTERPROC _glVertexAttribIPointer;
   PFNGLVERTEXATTRIBLPOINTERPROC _glVertexAttribLPointer;
@@ -1060,6 +1087,7 @@ public:
   bool _supports_texture_max_level;
 
 #ifndef OPENGLES_1
+  GLsizei _sattr_instance_count;
   GLsizei _instance_count;
 #endif
 
@@ -1091,6 +1119,11 @@ public:
   GLuint _white_texture;
 
 #ifndef NDEBUG
+#ifndef OPENGLES_1
+  PFNGLPUSHGROUPMARKEREXTPROC _glPushGroupMarker;
+  PFNGLPOPGROUPMARKEREXTPROC _glPopGroupMarker;
+#endif
+
   bool _show_texture_usage;
   int _show_texture_usage_max_size;
   int _show_texture_usage_index;
@@ -1118,6 +1151,7 @@ public:
   static PStatCollector _texture_update_pcollector;
   static PStatCollector _fbo_bind_pcollector;
   static PStatCollector _check_error_pcollector;
+  static PStatCollector _check_residency_pcollector;
 
 public:
   virtual TypeHandle get_type() const {

@@ -63,7 +63,7 @@ static CubeFaceDef cube_faces[6] = {
 
 /**
  * Normally, the GraphicsOutput constructor is not called directly; these are
- * created instead via the GraphicsEngine::make_window() function.
+ * created instead via the GraphicsEngine::make_output() function.
  */
 GraphicsOutput::
 GraphicsOutput(GraphicsEngine *engine, GraphicsPipe *pipe,
@@ -77,6 +77,7 @@ GraphicsOutput(GraphicsEngine *engine, GraphicsPipe *pipe,
   _lock("GraphicsOutput"),
   _cull_window_pcollector(_cull_pcollector, name),
   _draw_window_pcollector(_draw_pcollector, name),
+  _clear_window_pcollector(_draw_window_pcollector, "Clear"),
   _size(0, 0)
 {
 #ifdef DO_MEMORY_USAGE
@@ -358,6 +359,12 @@ add_render_texture(Texture *tex, RenderTextureMode mode,
     // If we're still planning on binding, indicate it in texture properly.
     tex->set_render_to_texture(true);
   }
+  else if ((plane == RTP_depth || plane == RTP_depth_stencil) && _fb_properties.get_depth_bits() == 0) {
+    // If we're not providing the depth buffer, we need something to copy from.
+    display_cat.error()
+      << "add_render_texture: can't copy depth from framebuffer without depth bits!\n";
+    return;
+  }
 
   CDWriter cdata(_cycler, true);
   RenderTexture result;
@@ -374,6 +381,8 @@ add_render_texture(Texture *tex, RenderTextureMode mode,
  * This is a deprecated interface that made sense back when GraphicsOutputs
  * could only render into one texture at a time.  From now on, use
  * clear_render_textures and add_render_texture instead.
+ *
+ * @deprecated Use add_render_texture() instead.
  */
 void GraphicsOutput::
 setup_render_texture(Texture *tex, bool allow_bind, bool to_ram) {
@@ -411,15 +420,39 @@ is_active() const {
     return false;
   }
 
-  CDReader cdata(_cycler);
+  CDLockedReader cdata(_cycler);
+  if (!cdata->_active) {
+    return false;
+  }
+
   if (cdata->_one_shot_frame != -1) {
     // If one_shot is in effect, then we are active only for the one indicated
     // frame.
     if (cdata->_one_shot_frame != ClockObject::get_global_clock()->get_frame_count()) {
       return false;
+    } else {
+      return true;
     }
   }
-  return cdata->_active;
+
+  // If the window has a clear value set, it is active.
+  if (is_any_clear_active()) {
+    return true;
+  }
+
+  // If we triggered a copy operation, it is also active.
+  if (_trigger_copy) {
+    return true;
+  }
+
+  // The window is active if at least one display region is active.
+  if (cdata->_active_display_regions_stale) {
+    CDWriter cdataw(((GraphicsOutput *)this)->_cycler, cdata, false);
+    ((GraphicsOutput *)this)->do_determine_display_regions(cdataw);
+    return !cdataw->_active_display_regions.empty();
+  } else {
+    return !cdata->_active_display_regions.empty();
+  }
 }
 
 /**

@@ -189,6 +189,7 @@ init_libbullet() {
   BulletDebugNode::register_with_read_factory();
   BulletPlaneShape::register_with_read_factory();
   BulletRigidBodyNode::register_with_read_factory();
+  BulletGhostNode::register_with_read_factory();
   BulletSphereShape::register_with_read_factory();
   BulletTriangleMesh::register_with_read_factory();
   BulletTriangleMeshShape::register_with_read_factory();
@@ -207,7 +208,9 @@ init_libbullet() {
 
   // Initialize notification category
   bullet_cat.init();
-  bullet_cat.debug() << "initialize module" << std::endl;
+  if (bullet_cat.is_debug()) {
+    bullet_cat.debug() << "initialize module" << std::endl;
+  }
 
   // Register the Bullet system
   PandaSystem *ps = PandaSystem::get_global_ptr();

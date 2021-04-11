@@ -23,6 +23,7 @@
 #include "pointerTo.h"
 #include "drawMask.h"
 #include "pvector.h"
+#include "instanceList.h"
 
 class PandaNode;
 class CullTraverser;
@@ -67,6 +68,8 @@ PUBLISHED:
   void apply_transform_and_state(CullTraverser *trav);
   void apply_transform(const TransformState *node_transform);
 
+  MAKE_PROPERTY(node_path, get_node_path);
+
 private:
   // We store a chain leading all the way to the root, so that we can compose
   // a NodePath.  We may be able to eliminate this requirement in the future.
@@ -79,6 +82,7 @@ public:
   CPT(RenderState) _state;
   PT(GeometricBoundingVolume) _view_frustum;
   CPT(CullPlanes) _cull_planes;
+  CPT(InstanceList) _instances;
   DrawMask _draw_mask;
   int _portal_depth;
 

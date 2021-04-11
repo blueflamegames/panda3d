@@ -132,8 +132,10 @@ FfmpegAudioCursor(FfmpegAudio *src) :
   // Set up the resample context if necessary.
   if (_audio_ctx->sample_fmt != AV_SAMPLE_FMT_S16) {
 #ifdef HAVE_SWRESAMPLE
-    ffmpeg_cat.debug()
-      << "Codec does not use signed 16-bit sample format.  Setting up swresample context.\n";
+    if (ffmpeg_cat.is_debug()) {
+      ffmpeg_cat.debug()
+        << "Codec does not use signed 16-bit sample format.  Setting up swresample context.\n";
+    }
 
     _resample_ctx = swr_alloc();
     av_opt_set_int(_resample_ctx, "in_channel_count", _audio_channels, 0);
@@ -210,6 +212,23 @@ FfmpegAudioCursor::
  */
 void FfmpegAudioCursor::
 cleanup() {
+  if (_audio_ctx && _audio_ctx->codec) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 37, 100)
+    // We need to drain the codec to prevent a memory leak.
+    avcodec_send_packet(_audio_ctx, nullptr);
+    while (avcodec_receive_frame(_audio_ctx, _frame) == 0) {}
+    avcodec_flush_buffers(_audio_ctx);
+#endif
+
+    avcodec_close(_audio_ctx);
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 52, 0)
+    avcodec_free_context(&_audio_ctx);
+#else
+    av_free(_audio_ctx);
+#endif
+  }
+  _audio_ctx = nullptr;
+
   if (_frame) {
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 45, 101)
     av_frame_free(&_frame);
@@ -236,16 +255,6 @@ cleanup() {
     _buffer_alloc = nullptr;
     _buffer = nullptr;
   }
-
-  if ((_audio_ctx)&&(_audio_ctx->codec)) {
-    avcodec_close(_audio_ctx);
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 52, 0)
-    avcodec_free_context(&_audio_ctx);
-#else
-    delete _audio_ctx;
-#endif
-  }
-  _audio_ctx = nullptr;
 
   if (_format_ctx) {
     _ffvfile.close();
@@ -455,7 +464,7 @@ seek(double t) {
  * read.  Your buffer must be equal in size to N * channels.  Multiple-channel
  * audio will be interleaved.
  */
-void FfmpegAudioCursor::
+int FfmpegAudioCursor::
 read_samples(int n, int16_t *data) {
   int desired = n * _audio_channels;
 
@@ -479,4 +488,5 @@ read_samples(int n, int16_t *data) {
 
   }
   _samples_read += n;
+  return n;
 }

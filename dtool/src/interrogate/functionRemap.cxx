@@ -397,17 +397,25 @@ get_call_str(const string &container, const vector_string &pexprs) const {
     }
 
     // It's not possible to assign arrays in C++, we have to copy them.
-    CPPArrayType *array_type = _parameters[_first_true_parameter]._remap->get_orig_type()->as_array_type();
+    bool paren_close = false;
+    CPPType *param_type = _parameters[_first_true_parameter]._remap->get_orig_type();
+    CPPArrayType *array_type = param_type->as_array_type();
     if (array_type != nullptr) {
       call << "std::copy(" << expr << ", " << expr << " + " << *array_type->_bounds << ", ";
-    } else {
+      paren_close = true;
+    }
+    else if (TypeManager::is_pointer_to_PyObject(param_type)) {
+      call << "Dtool_Assign_PyObject(" << expr << ", ";
+      paren_close = true;
+    }
+    else {
       call << expr << " = ";
     }
 
     _parameters[_first_true_parameter]._remap->pass_parameter(call,
                     get_parameter_expr(_first_true_parameter, pexprs));
 
-    if (array_type != nullptr) {
+    if (paren_close) {
       call << ')';
     }
 
@@ -437,15 +445,16 @@ get_call_str(const string &container, const vector_string &pexprs) const {
       } else if (_has_this && !container.empty()) {
         // If we have a "this" parameter, the calling convention is also a bit
         // different.
-        call << "(";
+        call << "((";
         _parameters[0]._remap->pass_parameter(call, container);
-        call << ")." << _cppfunc->get_local_name();
+        call << ")." << _cppfunc->get_local_name() << ")";
 
       } else {
+        call << "(";
         if (_cpptype != nullptr) {
           call << _cpptype->get_local_name(&parser);
         }
-        call << "::" << _cppfunc->get_local_name();
+        call << "::" << _cppfunc->get_local_name() << ")";
       }
     }
     call << "(";
@@ -729,6 +738,11 @@ setup_properties(const InterrogateFunction &ifunc, InterfaceMaker *interface_mak
       _void_return = true;
     }
 
+  } else if (fname == "operator <=>") {
+    // This returns an opaque object that we must leave unchanged.
+    _return_type = new ParameterRemapUnchanged(rtype);
+    _void_return = false;
+
   } else {
     // The normal case.
     _return_type = interface_maker->remap_parameter(_cpptype, rtype);
@@ -770,6 +784,11 @@ setup_properties(const InterrogateFunction &ifunc, InterfaceMaker *interface_mak
     // fully defined here, particularly if the class is defined in some other
     // library.
     _return_value_destructor = builder.get_destructor_for(return_meat_type);
+  }
+
+  if (_type == T_getter && TypeManager::is_pointer_to_PyObject(return_type)) {
+    _manage_reference_count = true;
+    _return_value_needs_management = true;
   }
 
   // Check for a special meaning by name and signature.
@@ -886,9 +905,9 @@ setup_properties(const InterrogateFunction &ifunc, InterfaceMaker *interface_mak
 
     } else if (fname == "operator /") {
       if (_has_this && _parameters.size() == 2 &&
-          TypeManager::is_float(_parameters[1]._remap->get_new_type())) {
-        // This division operator takes a single float argument.
-        _flags |= F_divide_float;
+          TypeManager::is_integer(_parameters[1]._remap->get_new_type())) {
+        // This division operator takes a single integer argument.
+        _flags |= F_divide_integer;
       }
 
     } else if (fname == "get_key" || fname == "get_hash") {
@@ -905,6 +924,9 @@ setup_properties(const InterrogateFunction &ifunc, InterfaceMaker *interface_mak
             || fname == "__getattr__"
             || fname == "__delattr__") {
       // Just to prevent these from getting keyword arguments.
+
+    } else if (fname == "__setstate__") {
+      _args_type = InterfaceMaker::AT_single_arg;
 
     } else {
       if (_args_type == InterfaceMaker::AT_varargs) {
@@ -930,9 +952,9 @@ setup_properties(const InterrogateFunction &ifunc, InterfaceMaker *interface_mak
   case T_assignment_method:
     if (fname == "operator /=") {
       if (_has_this && _parameters.size() == 2 &&
-          TypeManager::is_float(_parameters[1]._remap->get_new_type())) {
-        // This division operator takes a single float argument.
-        _flags |= F_divide_float;
+          TypeManager::is_integer(_parameters[1]._remap->get_new_type())) {
+        // This division operator takes a single integer argument.
+        _flags |= F_divide_integer;
       }
     }
     break;

@@ -83,6 +83,15 @@ make_pos_hpr(const LVecBase3 &pos, const LVecBase3 &hpr) {
  * Makes a new TransformState with the specified components.
  */
 INLINE CPT(TransformState) TransformState::
+make_pos_quat(const LVecBase3 &pos, const LQuaternion &quat) {
+  return make_pos_quat_scale(pos, quat,
+                             LVecBase3(1.0, 1.0f, 1.0f));
+}
+
+/**
+ * Makes a new TransformState with the specified components.
+ */
+INLINE CPT(TransformState) TransformState::
 make_scale(PN_stdfloat scale) {
   // We actually map this 3-d uniform make_scale() to the 2-d version--might
   // as well call it a 2-d scale.
@@ -754,6 +763,34 @@ flush_level() {
 }
 
 /**
+ * Overrides this method to update PStats appropriately.
+ */
+INLINE void TransformState::
+cache_ref_only() const {
+#ifdef DO_PSTATS
+  int old_referenced_bits = get_referenced_bits();
+  NodeCachedReferenceCount::cache_ref_only();
+  consider_update_pstats(old_referenced_bits);
+#else  // DO_PSTATS
+  NodeCachedReferenceCount::cache_ref_only();
+#endif  // DO_PSTATS
+}
+
+/**
+ * Overrides this method to update PStats appropriately.
+ */
+INLINE void TransformState::
+cache_unref_only() const {
+#ifdef DO_PSTATS
+  int old_referenced_bits = get_referenced_bits();
+  NodeCachedReferenceCount::cache_unref_only();
+  consider_update_pstats(old_referenced_bits);
+#else  // DO_PSTATS
+  NodeCachedReferenceCount::cache_unref_only();
+#endif  // DO_PSTATS
+}
+
+/**
  * Reimplements NodeReferenceCount::node_unref().  We do this because we have
  * a non-virtual unref() method.
  */
@@ -769,7 +806,7 @@ do_node_unref() const {
  */
 INLINE bool TransformState::
 do_cache_unref() const {
-  cache_unref_only();
+  NodeCachedReferenceCount::cache_unref_only();
   return unref();
 }
 

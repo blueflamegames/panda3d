@@ -539,12 +539,45 @@ copy_to(const NodePath &other, int sort, Thread *current_thread) const {
   nassertr(other._error_type == ET_ok, fail());
 
   PandaNode *source_node = node();
-  PT(PandaNode) copy_node = source_node->copy_subgraph(current_thread);
+  PandaNode::InstanceMap inst_map;
+  PT(PandaNode) copy_node = source_node->r_copy_subgraph(inst_map, current_thread);
   nassertr(copy_node != nullptr, fail());
 
   copy_node->reset_prev_transform(current_thread);
 
-  return other.attach_new_node(copy_node, sort, current_thread);
+  NodePath result = other.attach_new_node(copy_node, sort, current_thread);
+
+  // Temporary hack fix: if this root NodePath had lights applied that are
+  // located inside this subgraph, we need to fix them.
+  const RenderState *state = source_node->get_state();
+  const LightAttrib *lattr;
+  if (state->get_attrib(lattr)) {
+    CPT(LightAttrib) new_lattr = lattr;
+
+    for (size_t i = 0; i < lattr->get_num_off_lights(); ++i) {
+      NodePath light = lattr->get_off_light(i);
+      NodePath light2 = light;
+
+      if (light2.replace_copied_nodes(*this, result, inst_map, current_thread)) {
+        new_lattr = DCAST(LightAttrib, new_lattr->replace_off_light(light, light2));
+      }
+    }
+
+    for (size_t i = 0; i < lattr->get_num_on_lights(); ++i) {
+      NodePath light = lattr->get_on_light(i);
+      NodePath light2 = light;
+
+      if (light2.replace_copied_nodes(*this, result, inst_map, current_thread)) {
+        new_lattr = DCAST(LightAttrib, new_lattr->replace_on_light(light, light2));
+      }
+    }
+
+    if (new_lattr != lattr) {
+      result.set_state(state->set_attrib(std::move(new_lattr)));
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -718,7 +751,8 @@ get_state(const NodePath &other, Thread *current_thread) const {
     } else {
       pgraph_cat.error()
         << *this << " is not related to " << other << "\n";
-      nassertr(false, RenderState::make_empty());
+      nassert_raise("unrelated nodes");
+      return RenderState::make_empty();
     }
   }
 
@@ -792,7 +826,8 @@ get_transform(const NodePath &other, Thread *current_thread) const {
     } else {
       pgraph_cat.error()
         << *this << " is not related to " << other << "\n";
-      nassertr(false, TransformState::make_identity());
+      nassert_raise("unrelated nodes");
+      return TransformState::make_identity();
     }
   }
 
@@ -877,7 +912,8 @@ get_prev_transform(const NodePath &other, Thread *current_thread) const {
     } else {
       pgraph_cat.error()
         << *this << " is not related to " << other << "\n";
-      nassertr(false, TransformState::make_identity());
+      nassert_raise("unrelated nodes");
+      return TransformState::make_identity();
     }
   }
 
@@ -923,6 +959,11 @@ set_pos(const LVecBase3 &pos) {
   node()->reset_prev_transform();
 }
 
+/**
+ * Sets the X component of the position transform, leaving other components
+ * untouched.
+ * @see set_pos()
+ */
 void NodePath::
 set_x(PN_stdfloat x) {
   nassertv_always(!is_empty());
@@ -931,6 +972,11 @@ set_x(PN_stdfloat x) {
   set_pos(pos);
 }
 
+/**
+ * Sets the Y component of the position transform, leaving other components
+ * untouched.
+ * @see set_pos()
+ */
 void NodePath::
 set_y(PN_stdfloat y) {
   nassertv_always(!is_empty());
@@ -939,6 +985,11 @@ set_y(PN_stdfloat y) {
   set_pos(pos);
 }
 
+/**
+ * Sets the Z component of the position transform, leaving other components
+ * untouched.
+ * @see set_pos()
+ */
 void NodePath::
 set_z(PN_stdfloat z) {
   nassertv_always(!is_empty());
@@ -1091,6 +1142,11 @@ set_scale(const LVecBase3 &scale) {
   set_transform(transform->set_scale(scale));
 }
 
+/**
+ * Sets the x-scale component of the transform, leaving other components
+ * untouched.
+ * @see set_scale()
+ */
 void NodePath::
 set_sx(PN_stdfloat sx) {
   nassertv_always(!is_empty());
@@ -1100,6 +1156,11 @@ set_sx(PN_stdfloat sx) {
   set_transform(transform->set_scale(scale));
 }
 
+/**
+ * Sets the y-scale component of the transform, leaving other components
+ * untouched.
+ * @see set_scale()
+ */
 void NodePath::
 set_sy(PN_stdfloat sy) {
   nassertv_always(!is_empty());
@@ -1109,6 +1170,11 @@ set_sy(PN_stdfloat sy) {
   set_transform(transform->set_scale(scale));
 }
 
+/**
+ * Sets the z-scale component of the transform, leaving other components
+ * untouched.
+ * @see set_scale()
+ */
 void NodePath::
 set_sz(PN_stdfloat sz) {
   nassertv_always(!is_empty());
@@ -3134,6 +3200,21 @@ get_texture(TextureStage *stage) const {
 }
 
 /**
+ * Recursively searches the scene graph for references to the given texture,
+ * and replaces them with the new texture.
+ *
+ * @since 1.10.4
+ */
+void NodePath::
+replace_texture(Texture *tex, Texture *new_tex) {
+  nassertv_always(!is_empty());
+  nassertv(tex != nullptr);
+  nassertv(new_tex != nullptr);
+
+  r_replace_texture(node(), tex, new_tex);
+}
+
+/**
  * Returns the sampler state that has been given for the base-level texture
  * that has been set on this particular node.  If no sampler state was given,
  * this returns the texture's default sampler settings.
@@ -4161,6 +4242,22 @@ get_material() const {
 }
 
 /**
+ * Recursively searches the scene graph for references to the given material,
+ * and replaces them with the new material.
+ *
+ * @since 1.10.0
+ */
+void NodePath::
+replace_material(Material *mat, Material *new_mat) {
+  nassertv_always(!is_empty());
+  nassertv(mat != nullptr);
+  nassertv(new_mat != nullptr);
+
+  CPT(RenderAttrib) new_attrib = MaterialAttrib::make(new_mat);
+  r_replace_material(node(), mat, (const MaterialAttrib *)new_attrib.p());
+}
+
+/**
  * Sets the geometry at this level and below to render using the indicated
  * fog.
  */
@@ -4741,11 +4838,11 @@ set_billboard_axis(const NodePath &camera, PN_stdfloat offset) {
  * the camera, towards a specified "camera" instead of to the viewing camera.
  */
 void NodePath::
-set_billboard_point_eye(const NodePath &camera, PN_stdfloat offset) {
+set_billboard_point_eye(const NodePath &camera, PN_stdfloat offset, bool fixed_depth) {
   nassertv_always(!is_empty());
   CPT(RenderEffect) billboard = BillboardEffect::make
     (LVector3::up(), true, false,
-     offset, camera, LPoint3(0.0f, 0.0f, 0.0f));
+     offset, camera, LPoint3(0.0f, 0.0f, 0.0f), fixed_depth);
   node()->set_effect(billboard);
 }
 
@@ -4871,6 +4968,8 @@ get_transparency() const {
  * Specifically sets or disables a logical operation on this particular node.
  * If no other nodes override, this will cause geometry to be rendered without
  * color blending but instead using the given logical operator.
+ *
+ * @since 1.10.0
  */
 void NodePath::
 set_logic_op(LogicOpAttrib::Operation op, int priority) {
@@ -4883,6 +4982,8 @@ set_logic_op(LogicOpAttrib::Operation op, int priority) {
  * Completely removes any logical operation that may have been set on this
  * node via set_logic_op(). The geometry at this level and below will
  * subsequently be rendered using standard color blending.
+ *
+ * @since 1.10.0
  */
 void NodePath::
 clear_logic_op() {
@@ -4895,6 +4996,8 @@ clear_logic_op() {
  * particular node via set_logic_op().  If this returns true, then
  * get_logic_op() may be called to determine whether a logical operation has
  * been explicitly disabled for this node or set to particular operation.
+ *
+ * @since 1.10.0
  */
 bool NodePath::
 has_logic_op() const {
@@ -4909,6 +5012,8 @@ has_logic_op() const {
  * has_logic_op().  This does not necessarily imply that the geometry will
  * or will not be rendered with the given logical operation, as there may be
  * other nodes that override.
+ *
+ * @since 1.10.0
  */
 LogicOpAttrib::Operation NodePath::
 get_logic_op() const {
@@ -5674,7 +5779,9 @@ encode_to_bam_stream(vector_uchar &data, BamWriter *writer) const {
 
   // Tell the BamWriter which node is the root node, for making NodePaths
   // relative to when writing them out to the file.
-  writer->set_root_node(node());
+  if (!is_empty()) {
+    writer->set_root_node(node());
+  }
 
   // Write an initial Datagram to represent the error type and number of
   // nodes.
@@ -5767,6 +5874,48 @@ decode_from_bam_stream(vector_uchar data, BamReader *reader) {
   reader->set_source(nullptr);
 
   return result;
+}
+
+/**
+ * If the given root node is an ancestor of this NodePath, replaces all
+ * components below it using the given instance map.
+ *
+ * This is a helper method used by copy_to().
+ */
+bool NodePath::
+replace_copied_nodes(const NodePath &source, const NodePath &dest,
+                     const PandaNode::InstanceMap &inst_map,
+                     Thread *current_thread) {
+  nassertr(!dest.is_empty(), false);
+
+  int pipeline_stage = current_thread->get_pipeline_stage();
+
+  pvector<PandaNode *> nodes;
+
+  NodePathComponent *comp = _head;
+  while (comp != nullptr && comp != source._head) {
+    nodes.push_back(comp->get_node());
+
+    comp = comp->get_next(pipeline_stage, current_thread);
+  }
+
+  if (comp == nullptr) {
+    // The given source NodePath isn't an ancestor of this NodePath.
+    return false;
+  }
+
+  // Start at the dest NodePath and compose the new NodePath.
+  PT(NodePathComponent) new_comp = dest._head;
+  pvector<PandaNode *>::reverse_iterator it;
+  for (it = nodes.rbegin(); it != nodes.rend(); ++it) {
+    PandaNode::InstanceMap::const_iterator iit = inst_map.find(*it);
+    nassertr_always(iit != inst_map.end(), false);
+    new_comp = PandaNode::get_component(new_comp, iit->second, pipeline_stage, current_thread);
+  }
+
+  nassertr(new_comp != nullptr, false);
+  _head = std::move(new_comp);
+  return true;
 }
 
 /**
@@ -6407,6 +6556,53 @@ r_find_all_textures(PandaNode *node, TextureStage *stage,
 }
 
 /**
+ * Recursively replaces references to the given texture on this section of the
+ * scene graph with the given other texture.
+ */
+void NodePath::
+r_replace_texture(PandaNode *node, Texture *tex, Texture *new_tex) {
+  // Consider the state of the node itself.
+  {
+    CPT(RenderState) node_state = node->get_state();
+    const TextureAttrib *ta;
+    if (node_state->get_attrib(ta)) {
+      CPT(RenderAttrib) new_ta = ta->replace_texture(tex, new_tex);
+      if (new_ta != ta) {
+        node->set_state(node_state->set_attrib(new_ta));
+      }
+    }
+  }
+
+  // If this is a GeomNode, consider the state of any of its Geoms.
+  if (node->is_geom_node()) {
+    GeomNode *gnode;
+    DCAST_INTO_V(gnode, node);
+
+    int num_geoms = gnode->get_num_geoms();
+    for (int i = 0; i < num_geoms; i++) {
+      CPT(RenderState) geom_state = gnode->get_geom_state(i);
+
+      // Look for a TextureAttrib on the state.
+      const TextureAttrib *ta;
+      if (geom_state->get_attrib(ta)) {
+        CPT(RenderAttrib) new_ta = ta->replace_texture(tex, new_tex);
+        if (new_ta != ta) {
+          gnode->set_geom_state(i, geom_state->set_attrib(new_ta));
+        }
+      }
+    }
+  }
+
+  // Now consider children.
+  PandaNode::Children cr = node->get_children();
+  size_t num_children = cr.get_num_children();
+  for (size_t i = 0; i < num_children; ++i) {
+    PandaNode *child = cr.get_child(i);
+    r_replace_texture(child, tex, new_tex);
+  }
+}
+
+/**
  *
  */
 TextureStage * NodePath::
@@ -6630,11 +6826,62 @@ r_find_all_materials(PandaNode *node, const RenderState *state,
 }
 
 /**
+ *
+ */
+void NodePath::
+r_replace_material(PandaNode *node, Material *mat,
+                   const MaterialAttrib *new_attrib) {
+  // Consider the state of the node itself.
+  {
+    CPT(RenderState) node_state = node->get_state();
+    const MaterialAttrib *ma;
+    if (node_state->get_attrib(ma)) {
+      if (mat == ma->get_material()) {
+        node->set_state(node_state->set_attrib(new_attrib));
+      }
+    }
+  }
+
+  // If this is a GeomNode, consider the state of any of its Geoms.
+  if (node->is_geom_node()) {
+    GeomNode *gnode;
+    DCAST_INTO_V(gnode, node);
+
+    int num_geoms = gnode->get_num_geoms();
+    for (int i = 0; i < num_geoms; i++) {
+      CPT(RenderState) geom_state = gnode->get_geom_state(i);
+
+      // Look for a MaterialAttrib on the state.
+      const MaterialAttrib *ma;
+      if (geom_state->get_attrib(ma)) {
+        if (mat == ma->get_material()) {
+          // Replace it
+          gnode->set_geom_state(i, geom_state->set_attrib(new_attrib));
+        }
+      }
+    }
+  }
+
+  // Now consider children.
+  PandaNode::Children cr = node->get_children();
+  size_t num_children = cr.get_num_children();
+  for (size_t i = 0; i < num_children; ++i) {
+    PandaNode *child = cr.get_child(i);
+    r_replace_material(child, mat, new_attrib);
+  }
+}
+
+/**
  * Writes the contents of this object to the datagram for shipping out to a
  * Bam file.
  */
 void NodePath::
 write_datagram(BamWriter *manager, Datagram &dg) const {
+  if (is_empty()) {
+    manager->write_pointer(dg, nullptr);
+    return;
+  }
+
   PandaNode *root = DCAST(PandaNode, manager->get_root_node());
 
   // We have no root node to measure from.
